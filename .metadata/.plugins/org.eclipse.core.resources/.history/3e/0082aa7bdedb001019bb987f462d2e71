@@ -1,0 +1,112 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// 1. BASE ADDRESS & CONFIG
+// ==========================================
+#ifndef LED_7SEG_BASE
+    #ifdef PIO_0_BASE
+        #define LED_7SEG_BASE PIO_0_BASE
+    #else
+        #define LED_7SEG_BASE 0x11020
+    #endif
+#endif
+
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+#define RREF 430.0f
+#define RNOMINAL 100.0f
+#define SAI_SO_OFFSET 1.6f
+
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// ==========================================
+// 2. HAM HIEN THI LED
+// ==========================================
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    // Logic tách số cho LED
+    int val_int = (int)(temp * 10);
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+    led_val &= ~(1 << 15); // Bật dấu chấm
+
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_7SEG_BASE, led_val);
+}
+
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80;
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_0_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F };
+    alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+// ==========================================
+// 3. MAIN (FIX LOI CONSOLE)
+// ==========================================
+int main() {
+    printf("--- HE THONG DO NHIET DO (DA FIX CONSOLE) ---\n");
+
+    // Cấu hình 0xC2 (Chế độ 2 dây/4 dây)
+    max31865_write(MAX31865_CONFIG_REG, 0xC2);
+    usleep(100000);
+
+    while(1) {
+        alt_u8 rtd_data[2];
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        int fault = rtd_val & 0x01;
+        rtd_val >>= 1;
+
+        if (fault) {
+            printf("Sensor Fault! Resetting config...\n");
+            max31865_write(MAX31865_CONFIG_REG, 0xC2);
+        }
+
+        // Tính toán Float (Để hiển thị LED)
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp_raw = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+        float temp_chuan = temp_raw - SAI_SO_OFFSET;
+
+        // --- KHU VỰC SỬA LỖI HIỂN THỊ CONSOLE ---
+        // Tuyệt đối không dùng %f, dùng %d.%d
+
+        // Bước 1: Nhân 10 lấy phần nguyên (Ví dụ 31.5 độ -> 315)
+        int val_hien_thi = (int)(temp_chuan * 10);
+
+        // Bước 2: Tách lấy phần nguyên (31) và phần dư (5)
+        int phan_nguyen = val_hien_thi / 10;
+        int phan_thap_phan = abs(val_hien_thi % 10);
+
+        // Bước 3: Ép kiểu Rt về số nguyên để in luôn cho đẹp
+        int r_ohm_nguyen = (int)Rt;
+
+        // In ra: "ADC: 8568 | R: 112 Ohm | Nhiet do: 31.5 C"
+        printf("DATA,%d.%d\n", phan_nguyen, phan_thap_phan);
+        // --- HẾT KHU VỰC IN ---
+
+        display_temp(temp_chuan);
+        usleep(1000000);
+    }
+    return 0;
+}

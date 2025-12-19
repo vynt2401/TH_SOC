@@ -1,0 +1,85 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// Dia chi thanh ghi MAX31865
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thong so PT100
+#define RREF 430.0f     // Dien tro tham chieu
+#define RNOMINAL 100.0f // Dien tro danh dinh tai 0 do C
+
+// Ma LED 7 doan (0-9) (Active LOW)
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Ham hien thi so len 3 LED
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10);
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    // HEX0: Don vi, HEX1: Chuc, HEX2: Tram
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+
+    // Bat dau cham o hang chuc (HEX1)
+    led_val &= ~(1 << 15);
+
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_7SEG_BASE, led_val);
+}
+
+// Ghi 1 byte vao thanh ghi
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80; // MSB = 1 la Write
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_0_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// Doc n byte
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F }; // MSB = 0 la Read
+    alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("He thong khoi dong...\n");
+
+    // 1. Cau hinh MAX31865
+    // Vbias = 1, Auto conversion, Fault Clear
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+    usleep(100000);
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 2. Doc MSB va LSB
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // Ghep thanh 16 bit
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        rtd_val >>= 1; // Bo bit Fault
+
+        // 3. Tinh toan
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        printf("RTD Raw: %d, Res: %.2f Ohm, Temp: %.2f C\n", rtd_val, Rt, temp);
+
+        // 4. Hien thi LED
+        display_temp(temp);
+
+        usleep(500000);
+    }
+    return 0;
+}

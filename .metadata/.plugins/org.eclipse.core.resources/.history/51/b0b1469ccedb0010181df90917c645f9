@@ -1,0 +1,93 @@
+
+#include <stdio.h>
+#include <unistd.h>
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// Địa chỉ thanh ghi MAX31865
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thông số PT100
+#define RREF 430.0f  // Điện trở tham chiếu trên board tím (thường là 430 Ohm, check con điện trở đen ghi 4300 hoặc 431)
+#define RNOMINAL 100.0f // Điện trở danh định của PT100 tại 0 độ C
+
+// Mã LED 7 đoạn (0-9) cho DE10-Standard (Active LOW)
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Hàm hiển thị số lên 3 LED (HEX2, HEX1, HEX0)
+// Hiển thị dạng: 2 5 . 5 (Độ)
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10); // Ví dụ 25.5 -> 255
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    // HEX0: Đơn vị
+    // HEX1: Chục (kèm dấu chấm) -> AND với 0x7F để sáng dấu chấm (nếu board hỗ trợ)
+    // HEX2: Trăm
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+
+    // Bật dấu chấm ở hàng chục (HEX1 bit 7 thường là dot point)
+    led_val &= ~(1 << 15);
+
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_7SEG_BASE, led_val);
+}
+
+// Ghi 1 byte vào thanh ghi
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80; // MSB = 1 là Write
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_0_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// Đọc n byte
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F }; // MSB = 0 là Read
+    alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("He thong khoi dong...\n");
+
+    // 1. Cấu hình MAX31865
+    // Vbias = 1 (Bật), Conversion Mode = 1 (Auto), 3-wire = 0 (giả sử 2/4 wire), Fault Clear = 1
+    // Config: 1101 0010 = 0xD2 (Nếu dùng 3-wire thì bit 4 là 1 -> 0xE2)
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+    usleep(100000); // Chờ ổn định
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 2. Đọc 2 thanh ghi RTD MSB và LSB
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // Ghép thành 16 bit
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        rtd_val >>= 1; // Bỏ bit Fault (LSB)
+
+        // 3. Tính toán nhiệt độ
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+
+        // Công thức Callendar-Van Dusen (Rất gần đúng cho dải dương)
+        // Temp = (Rt - R0) / (R0 * alpha) với alpha = 0.00385
+        float temp = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        printf("RTD Raw: %d, Res: %.2f Ohm, Temp: %.2f C\n", rtd_val, Rt, temp);
+
+        // 4. Hiển thị LED
+        display_temp(temp);
+
+        usleep(500000); // Delay 0.5s
+    }
+    return 0;
+}

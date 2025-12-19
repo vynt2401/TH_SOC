@@ -1,0 +1,114 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h> // Thư viện cho hàm abs()
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// CẤU HÌNH ĐỊA CHỈ (QUAN TRỌNG)
+// ==========================================
+
+// 1. LED 7 ĐOẠN: Dùng đúng tên bạn đã xác nhận trong system.h
+// Nếu Eclipse vẫn báo đỏ gạch chân chữ này thì KỆ NÓ (do Eclipse lag), miễn Build không lỗi là được.
+#define LED_BASE  LED_7SEG_BASE
+
+// 2. SPI: Giữ nguyên tên mặc định (như bạn yêu cầu)
+// Nếu nạp vào mà không đọc được, hãy kiểm tra lại xem trong system.h có phải là SPI_0_BASE không
+#define SPI_BASE  SPI_0_BASE
+
+// ==========================================
+// CẤU HÌNH MAX31865
+// ==========================================
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thông số PT100
+#define RREF 430.0f  // Điện trở tham chiếu (430 Ohm hoặc 4300 Ohm)
+#define RNOMINAL 100.0f // PT100 100 Ohm
+
+// Mã LED 7 đoạn (0-9) cho DE10-Standard (Active LOW)
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Hàm hiển thị số lên 3 LED (HEX2, HEX1, HEX0)
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10); // Ví dụ 25.5 -> 255
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    // HEX0: Đơn vị, HEX1: Chục, HEX2: Trăm
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+
+    // Bật dấu chấm ở hàng chục (HEX1 bit 7 thường là dot point)
+    led_val &= ~(1 << 15);
+
+    // Ghi ra LED
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_BASE, led_val);
+}
+
+// Ghi 1 byte vào thanh ghi
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80; // MSB = 1 là Write
+    tx_buf[1] = data;
+    // Gửi lệnh qua SPI
+    alt_avalon_spi_command(SPI_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// Đọc n byte
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F }; // MSB = 0 là Read
+    alt_avalon_spi_command(SPI_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("He thong khoi dong...\n");
+
+    // 1. Cấu hình MAX31865
+    // Config: Vbias=On, Auto=On, FaultClear=On
+    // 0xD2 (cho 2/4 dây) hoặc 0xE2 (cho 3 dây - nếu bạn đã cắt mạch)
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+
+    usleep(100000); // Chờ ổn định
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 2. Đọc 2 thanh ghi RTD MSB và LSB
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // Ghép thành 16 bit
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+
+        // Debug: Nếu rtd_val = 0 hoặc rtd_val = 65535, có thể lỗi dây
+        // Bỏ bit Fault (LSB)
+        rtd_val >>= 1;
+
+        // 3. Tính toán nhiệt độ
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        // 4. In ra màn hình (FIX LỖI KHÔNG HIỆN SỐ THỰC)
+        // Tách phần nguyên và phần thập phân để in bằng %d
+        int phan_nguyen = (int)temp;
+        int phan_thap_phan = abs((int)((temp - phan_nguyen) * 100));
+
+        // In ra 2 chữ số thập phân (ví dụ: 25.05)
+        printf("RTD Raw: %d, Res: %d Ohm, Temp: %d.%02d C\n",
+               rtd_val, (int)Rt, phan_nguyen, phan_thap_phan);
+
+        // 5. Hiển thị LED
+        display_temp(temp);
+
+        usleep(500000); // Delay 0.5s
+    }
+    return 0;
+}

@@ -1,0 +1,111 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h> // Để dùng hàm abs()
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// 1. CẤU HÌNH HIỆU CHỈNH NHIỆT ĐỘ (QUAN TRỌNG)
+// ==========================================
+// Hãy thay đổi số này để chỉnh nhiệt độ cho chuẩn với nhiệt kế mẫu
+// Ví dụ: Đo được 30.5 độ, nhưng nhiệt kế chuẩn là 29.0 -> Offset là -1.5
+#define TEMP_OFFSET  0.0f
+
+// ==========================================
+// 2. CẤU HÌNH ĐỊA CHỈ PHẦN CỨNG
+// ==========================================
+#define LED_BASE  LED_7SEG_BASE
+#define SPI_BASE  SPI_0_BASE
+
+// ==========================================
+// 3. CẤU HÌNH MAX31865
+// ==========================================
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thông số PT100
+#define RREF 430.0f  // Điện trở tham chiếu
+#define RNOMINAL 100.0f // Điện trở tại 0 độ C
+
+// Mã LED 7 đoạn (0-9) - Active LOW
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Hàm hiển thị số lên LED 7 đoạn
+void display_temp(float temp) {
+    // Giới hạn hiển thị để không bị lỗi LED
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10); // Ví dụ: 25.5 độ -> 255
+    int tram = val_int / 100;       // 2
+    int chuc = (val_int % 100) / 10; // 5
+    int donvi = val_int % 10;       // 5
+
+    // HEX0: Đơn vị | HEX1: Chục | HEX2: Trăm
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+
+    // Bật dấu chấm thập phân ở hàng chục (HEX1)
+    led_val &= ~(1 << 15);
+
+    // Ghi ra LED
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_BASE, led_val);
+}
+
+// Ghi 1 byte vào MAX31865
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80; // MSB = 1 (Write)
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// Đọc n byte từ MAX31865
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F }; // MSB = 0 (Read)
+    alt_avalon_spi_command(SPI_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("He thong khoi dong...\n");
+    printf("Offset hieu chinh: %.2f C\n", TEMP_OFFSET);
+
+    // Cấu hình MAX31865 (Vbias=On, Auto=On)
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+    usleep(100000);
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 1. Đọc ADC
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // Ghép 16 bit
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        rtd_val >>= 1; // Bỏ bit lỗi
+
+        // 2. Tính nhiệt độ thô (Raw Temp)
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp_raw = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        // 3. ÁP DỤNG HIỆU CHỈNH (CALIBRATION)
+        float temp_final = temp_raw + TEMP_OFFSET;
+
+        // 4. In ra màn hình (In số nguyên để tránh lỗi %f)
+        int phan_nguyen = (int)temp_final;
+        int phan_thap_phan = abs((int)((temp_final - phan_nguyen) * 100));
+
+        printf("Res: %d Ohm | Raw: %.2f | Final: %d.%02d C\n",
+               (int)Rt, temp_raw, phan_nguyen, phan_thap_phan);
+
+        // 5. Hiển thị LED
+        display_temp(temp_final);
+
+        usleep(500000); // 0.5 giây đo 1 lần
+    }
+    return 0;
+}

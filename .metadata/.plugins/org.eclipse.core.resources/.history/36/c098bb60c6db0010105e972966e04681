@@ -1,0 +1,107 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h> // BẮT BUỘC CÓ để dùng hàm abs()
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// 1. XỬ LÝ LỖI TÊN GỌI (MAPPING)
+// ==========================================
+// Đoạn này giúp code chạy được dù trong system.h là tên gì
+#ifndef LED_7SEG_BASE
+    #ifdef PIO_0_BASE
+        #define LED_7SEG_BASE PIO_0_BASE
+    #else
+        #define LED_7SEG_BASE 0x11020 // Địa chỉ cứng (dự phòng)
+    #endif
+#endif
+
+// ==========================================
+// 2. CẤU HÌNH MAX31865
+// ==========================================
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thông số PT100
+#define RREF 430.0f
+#define RNOMINAL 100.0f
+
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Hàm hiển thị LED (Bạn đã xác nhận hàm này chạy đúng)
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10);
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+    led_val &= ~(1 << 15); // Bật dấu chấm
+
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_7SEG_BASE, led_val);
+}
+
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80;
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_0_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F };
+    alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("He thong khoi dong...\n");
+
+    // Cấu hình module
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+    usleep(100000);
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // Đọc dữ liệu
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        rtd_val >>= 1; // Bỏ bit Fault
+
+        // Tính toán nhiệt độ (Biến temp này đang đúng -> 30.7)
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        // ========================================================
+        // PHẦN SỬA CHỮA: IN RA CONSOLE KHÔNG DÙNG %f
+        // ========================================================
+
+        // Bước 1: Lấy phần nguyên (Ví dụ 30.7 -> lấy 30)
+        int phan_nguyen = (int)temp;
+
+        // Bước 2: Lấy phần thập phân (Ví dụ 30.7 - 30 = 0.7 -> nhân 100 thành 70)
+        // Dùng abs() để trị tuyệt đối, tránh lỗi dấu trừ khi in
+        int phan_thap_phan = abs((int)((temp - phan_nguyen) * 100));
+
+        // Bước 3: In ra 2 số nguyên ghép lại
+        // %02d nghĩa là số thập phân luôn hiện 2 chữ số (ví dụ 5 thành 05)
+        printf("Nhiet do: %d.%02d C (Res: %d Ohm)\n", phan_nguyen, phan_thap_phan, (int)Rt);
+
+        // ========================================================
+
+        // Hiển thị LED
+        display_temp(temp);
+
+        usleep(500000);
+    }
+    return 0;
+}

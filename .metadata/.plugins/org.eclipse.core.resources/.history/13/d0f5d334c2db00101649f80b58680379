@@ -1,0 +1,112 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h> // Thêm thư viện này để dùng hàm abs()
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// CẤU HÌNH ĐỊA CHỈ PHẦN CỨNG
+// ==========================================
+// Dựa trên file system.h của bạn, tên đúng là PIO_0_BASE
+// Nếu bạn đã đổi tên trong Qsys thì sửa lại dòng này
+#define LED_BASE PIO_0_BASE
+
+// Địa chỉ thanh ghi MAX31865
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+// Thông số PT100
+#define RREF 430.0f  // Điện trở tham chiếu (430 Ohm hoặc 4300 Ohm tùy module)
+#define RNOMINAL 100.0f // PT100 là 100 Ohm
+
+// Mã LED 7 đoạn (Active LOW: 0 sáng, 1 tắt)
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// Hàm hiển thị số lên 3 LED (HEX2, HEX1, HEX0)
+void display_temp(float temp) {
+    if (temp < 0) temp = 0;
+    if (temp > 999) temp = 999;
+
+    int val_int = (int)(temp * 10); // 25.5 -> 255
+    int tram = val_int / 100;
+    int chuc = (val_int % 100) / 10;
+    int donvi = val_int % 10;
+
+    // Ghép bit:
+    // HEX0 (8 bit thấp) | HEX1 (8 bit giữa) | HEX2 (8 bit cao)
+    // Lưu ý: Code Verilog của bạn gán HEX1 lấy từ bit 8-14, HEX2 lấy từ 16-22
+    alt_u32 led_val = led_code[donvi] | (led_code[chuc] << 8) | (led_code[tram] << 16);
+
+    // Ghi ra PIO
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_BASE, led_val);
+}
+
+// Ghi 1 byte vào thanh ghi MAX31865
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80; // MSB = 1 là Write
+    tx_buf[1] = data;
+    // Gửi 2 byte (Addr + Data)
+    alt_avalon_spi_command(SPI_0_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// Đọc n byte từ MAX31865
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F }; // MSB = 0 là Read
+    // Gửi địa chỉ, sau đó đọc về 'len' byte
+    alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("--- HE THONG DO NHIET DO PT100 ---\n");
+
+    // 1. Cấu hình MAX31865
+    // 0xD2: Vbias On, Auto Conversion, 2/4-Wire Mode (Bit 4 = 0)
+    // Nếu dùng 3-Wire (cắt mạch 24-3), sửa thành 0xE2
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+
+    usleep(100000); // Chờ ổn định
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 2. Đọc giá trị ADC (16 bit)
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // Ghép byte cao và byte thấp
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+
+        // Kiểm tra bit lỗi (bit cuối cùng)
+        if (rtd_val & 0x01) {
+            printf("Loi Sensor (Fault Detected)\n");
+            // Có thể thêm lệnh đọc thanh ghi Fault 0x07 để debug
+        }
+
+        rtd_val >>= 1; // Bỏ bit Fault để lấy giá trị ADC thuần
+
+        // 3. Tính toán nhiệt độ
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        // 4. In ra màn hình (Xử lý lỗi %f của Nios II)
+        // Tách phần nguyên và phần thập phân để in bằng %d
+        int phan_nguyen = (int)temp;
+        int phan_thap_phan = abs((int)((temp - phan_nguyen) * 100));
+
+        printf("ADC: %5d | R: %3d.%02d Ohm | Temp: %3d.%02d C\n",
+               rtd_val,
+               (int)Rt, abs((int)((Rt - (int)Rt)*100)), // In điện trở
+               phan_nguyen, phan_thap_phan);            // In nhiệt độ
+
+        // 5. Hiển thị LED 7 đoạn
+        display_temp(temp);
+
+        usleep(500000); // Delay 0.5s
+    }
+    return 0;
+}

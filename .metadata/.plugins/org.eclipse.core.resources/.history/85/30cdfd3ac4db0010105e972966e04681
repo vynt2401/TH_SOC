@@ -1,0 +1,138 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h> // Hàm abs()
+#include <math.h>
+#include "system.h"
+#include "altera_avalon_spi.h"
+#include "altera_avalon_pio_regs.h"
+
+// ==========================================
+// 1. CẤU HÌNH HIỆU CHỈNH NHIỆT ĐỘ (CALIBRATION)
+// ==========================================
+// Bạn thay đổi số này để bù trừ sai số
+// Ví dụ: Code báo 28.5 độ, nhiệt kế chuẩn báo 27.0 độ -> Offset = -1.5
+#define TEMP_OFFSET  0.0f
+
+// ==========================================
+// 2. KHAI BÁO ĐỊA CHỈ PHẦN CỨNG
+// ==========================================
+// Tự động nhận diện tên trong system.h hoặc dùng địa chỉ cứng
+#ifdef LED_7SEG_BASE
+    #define LED_BASE LED_7SEG_BASE
+#else
+    #define LED_BASE 0x11020 // Địa chỉ mặc định nếu không tìm thấy tên
+#endif
+
+#ifdef SPI_0_BASE
+    #define SPI_BASE SPI_0_BASE
+#else
+    #define SPI_BASE 0x11000
+#endif
+
+// ==========================================
+// 3. CẤU HÌNH MAX31865 & PT100
+// ==========================================
+#define MAX31865_CONFIG_REG 0x00
+#define MAX31865_RTD_MSB_REG 0x01
+#define MAX31865_RTD_LSB_REG 0x02
+
+#define RREF 430.0f      // Điện trở tham chiếu (thường là 430 Ohm)
+#define RNOMINAL 100.0f  // PT100 tại 0 độ C
+
+// Mã LED 7 đoạn (0-9) - Active LOW (0 sáng, 1 tắt)
+const unsigned char led_code[] = {
+    0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+};
+
+// --- HÀM HIỂN THỊ LED 7 ĐOẠN (Dạng: XX.X) ---
+void display_temp_hex(float temp) {
+    // Giới hạn hiển thị 0 -> 99.9 độ (cho 3 LED)
+    if (temp < 0) temp = 0;
+    if (temp > 99.9) temp = 99.9;
+
+    // Nhân 10 để lấy 1 số sau dấu phẩy (Ví dụ 25.5 độ -> 255)
+    int val_int = (int)(temp * 10);
+
+    int tram  = 0;             // LED tắt (hoặc mở rộng nếu cần)
+    int chuc  = val_int / 100; // Số hàng chục (Ví dụ 2)
+    int donvi = (val_int % 100) / 10; // Số hàng đơn vị (Ví dụ 5)
+    int thap_phan = val_int % 10;     // Số sau dấu phẩy (Ví dụ 5)
+
+    // Nếu nhiệt độ > 100, logic tách số sẽ khác, nhưng ở đây demo nhiệt độ phòng < 100
+    // HEX2: Hàng chục | HEX1: Hàng đơn vị (kèm dấu chấm) | HEX0: Số thập phân
+    // Lưu ý: Logic này tùy thuộc vào bạn muốn hiện gì.
+    // Dưới đây là hiện dạng: [Chục][Đơn vị].[Thập phân] (Ví dụ: 2 5 . 5)
+
+    // Logic gán:
+    // HEX0 (Bits 0-6): Số thập phân
+    // HEX1 (Bits 8-14): Hàng đơn vị
+    // HEX2 (Bits 16-22): Hàng chục
+
+    alt_u32 led_val = led_code[thap_phan] |
+                      (led_code[donvi] << 8) |
+                      (led_code[chuc] << 16);
+
+    // Bật dấu chấm ở HEX1 (Hàng đơn vị)
+    // Bit 15 là bit dấu chấm của HEX1 (tùy mạch, thường là bit cao nhất của byte 2)
+    // Nếu LED nối kiểu khác, bạn thử bit 7, 15, 23. Ở đây ta thử bit 15.
+    led_val &= ~(1 << 15);
+
+    IOWR_ALTERA_AVALON_PIO_DATA(LED_BASE, led_val);
+}
+
+// --- HÀM SPI WRITE ---
+void max31865_write(alt_u8 addr, alt_u8 data) {
+    alt_u8 tx_buf[2];
+    tx_buf[0] = addr | 0x80;
+    tx_buf[1] = data;
+    alt_avalon_spi_command(SPI_BASE, 0, 2, tx_buf, 0, NULL, 0);
+}
+
+// --- HÀM SPI READ ---
+void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
+    alt_u8 tx_buf[1] = { addr & 0x7F };
+    alt_avalon_spi_command(SPI_BASE, 0, 1, tx_buf, len, buffer, 0);
+}
+
+int main() {
+    printf("\n--- HE THONG DO NHIET DO PT100 ---\n");
+    printf("Offset dang cai dat: %.2f C\n", TEMP_OFFSET);
+
+    // Cấu hình: Vbias=On, Auto=On, 2/4 Wire (0xD2) hoặc 3 Wire (0xE2)
+    max31865_write(MAX31865_CONFIG_REG, 0xD2);
+    usleep(100000);
+
+    while(1) {
+        alt_u8 rtd_data[2];
+
+        // 1. Đọc dữ liệu thô
+        max31865_read(MAX31865_RTD_MSB_REG, rtd_data, 2);
+
+        // 2. Xử lý bit
+        alt_u16 rtd_val = (rtd_data[0] << 8) | rtd_data[1];
+        rtd_val >>= 1; // Loại bỏ bit Fault
+
+        // 3. Tính toán điện trở & nhiệt độ thô
+        float Rt = (float)rtd_val * RREF / 32768.0f;
+        float temp_raw = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
+
+        // 4. ÁP DỤNG HIỆU CHỈNH
+        float temp_final = temp_raw + TEMP_OFFSET;
+
+        // 5. IN RA CONSOLE (Fix lỗi %f)
+        // Tách phần nguyên và thập phân
+        int p_nguyen = (int)temp_final;
+        int p_thapphan = abs((int)((temp_final - p_nguyen) * 100));
+
+        printf("Res: %d Ohm | Raw: %d.%02d | FINAL: %d.%02d C\n",
+               (int)Rt,
+               (int)temp_raw, abs((int)((temp_raw - (int)temp_raw)*100)),
+               p_nguyen, p_thapphan);
+
+        // 6. HIỂN THỊ LED
+        display_temp_hex(temp_final);
+
+        usleep(500000); // Đo lại sau 0.5s
+    }
+    return 0;
+}

@@ -1,0 +1,38 @@
+module Doan (
+    input CLOCK_50,
+    input [0:0] KEY, // Reset
+    // SPI cho MAX31865
+    output wire spi_clk,
+    output wire spi_mosi,
+    input  wire spi_miso,
+    output wire spi_cs_n,
+    // LED 7 đoạn (HEX0, HEX1, HEX2, HEX3)
+    output wire [6:0] HEX0,
+    output wire [6:0] HEX1,
+    output wire [6:0] HEX2
+);
+
+    // Dây nối từ Qsys ra
+    wire [31:0] led_data; // Dữ liệu PIO từ Nios
+
+    system_nios_system u0 (
+        .clk_clk       (CLOCK_50),
+        .reset_reset_n (KEY[0]),
+        
+        // Kết nối SPI
+        .spi_0_MISO    (spi_miso),
+        .spi_0_MOSI    (spi_mosi),
+        .spi_0_SCLK    (spi_clk),
+        .spi_0_SS_n    (spi_cs_n),
+        
+        // Kết nối LED
+        .led_7seg_export (led_data) 
+    );
+
+    // Gán dữ liệu từ PIO ra các chân HEX thực tế
+    // Giả sử PIO bit 0-6 là HEX0, 8-14 là HEX1...
+    assign HEX0 = led_data[6:0];
+    assign HEX1 = led_data[14:8];
+    assign HEX2 = led_data[22:16];
+
+endmodule
