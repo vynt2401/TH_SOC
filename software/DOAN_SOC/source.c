@@ -6,9 +6,7 @@
 #include "altera_avalon_spi.h"
 #include "altera_avalon_pio_regs.h"
 
-// ==========================================
-// 1. BASE ADDRESS & CONFIG
-// ==========================================
+//base address and config
 #ifndef LED_7SEG_BASE
     #ifdef PIO_0_BASE
         #define LED_7SEG_BASE PIO_0_BASE
@@ -29,9 +27,9 @@ const unsigned char led_code[] = {
     0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
 };
 
-// ==========================================
-// 2. HAM HIEN THI LED
-// ==========================================
+
+// ham hien thi led
+
 void display_temp(float temp) {
     if (temp < 0) temp = 0;
     if (temp > 999) temp = 999;
@@ -60,13 +58,11 @@ void max31865_read(alt_u8 addr, alt_u8 *buffer, int len) {
     alt_avalon_spi_command(SPI_0_BASE, 0, 1, tx_buf, len, buffer, 0);
 }
 
-// ==========================================
-// 3. MAIN (FIX LOI CONSOLE)
-// ==========================================
+
 int main() {
     printf("--- HE THONG DO NHIET DO (DA FIX CONSOLE) ---\n");
 
-    // Cấu hình 0xC2 (Chế độ 2 dây/4 dây)
+
     max31865_write(MAX31865_CONFIG_REG, 0xC2);
     usleep(100000);
 
@@ -83,27 +79,25 @@ int main() {
             max31865_write(MAX31865_CONFIG_REG, 0xC2);
         }
 
-        // Tính toán Float (Để hiển thị LED)
+      
         float Rt = (float)rtd_val * RREF / 32768.0f;
         float temp_raw = (Rt - RNOMINAL) / (RNOMINAL * 0.00385f);
         float temp_chuan = temp_raw - SAI_SO_OFFSET;
 
-        // --- KHU VỰC SỬA LỖI HIỂN THỊ CONSOLE ---
-        // Tuyệt đối không dùng %f, dùng %d.%d
-
-        // Bước 1: Nhân 10 lấy phần nguyên (Ví dụ 31.5 độ -> 315)
+        
+        
         int val_hien_thi = (int)(temp_chuan * 10);
 
-        // Bước 2: Tách lấy phần nguyên (31) và phần dư (5)
+       
         int phan_nguyen = val_hien_thi / 10;
         int phan_thap_phan = abs(val_hien_thi % 10);
 
-        // Bước 3: Ép kiểu Rt về số nguyên để in luôn cho đẹp
+        
         int r_ohm_nguyen = (int)Rt;
 
-        // In ra: "ADC: 8568 | R: 112 Ohm | Nhiet do: 31.5 C"
+        
         printf("DATA: %d.%d\n", phan_nguyen, phan_thap_phan);
-        // --- HẾT KHU VỰC IN ---
+        
 
         display_temp(temp_chuan);
         usleep(1000000);
